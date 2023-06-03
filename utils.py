@@ -13,127 +13,6 @@ from tokenizers.trainers import WordPieceTrainer
 from tokenizers.pre_tokenizers import Whitespace
 from tokenizers.processors import TemplateProcessing
 
-
-
-def train(model, train_loader, val_loader, loss_fn, optimizer, scheduler, device, epochs, clip, early_stopping, accumulation_steps=8):
-    # Ensure 'graphs' directory exists
-    if not os.path.exists('graphs'):
-        os.makedirs('graphs')
-
-    train_losses = []
-    val_losses = []
-
-    scaler = GradScaler()  # for mixed precision training
-
-    for epoch in range(epochs):
-        model.train()  # Set the model to training mode
-        running_loss = 0
-
-        # For storing norms
-        l2_norms = []
-
-        optimizer.zero_grad()  # reset gradients at the beginning of each epoch
-
-        for batch_idx, (docs, sums) in enumerate(train_loader):
-            docs = docs.to(device)
-            sums = sums.to(device)
-            
-            # Forward pass
-            with autocast():  # enable mixed precision training
-                output = model(docs, sums)
-                loss = loss_fn(output.view(-1, output.size(-1)), sums.view(-1))
-
-            loss = loss / accumulation_steps  # normalize the loss
-
-            # Backward pass and optimization
-            scaler.scale(loss).backward()  # scale the loss to prevent underflow/overflow
-
-            # Compute L2 norm of gradients and store
-            l2_norm = 0.0
-            for p in model.parameters():
-                if p.grad is not None:
-                    param_norm = p.grad.data.norm(2)
-                    l2_norm += param_norm.item() ** 2
-            l2_norms.append(l2_norm ** 0.5)
-
-            # Gradient clipping
-            # Note: we don't need to scale the gradients here because scaler.step() will do it for us
-            clip_grad_norm_(model.parameters(), clip)
-
-            # Update weights
-            if (batch_idx + 1) % accumulation_steps == 0:  # update weights every accumulation_steps
-                scaler.step(optimizer)  # unscale the gradients before performing optimizer.step()
-                scaler.update()
-                optimizer.zero_grad()  # reset gradients
-
-            # Update learning rate
-            scheduler.step()
-
-            running_loss += loss.item() * accumulation_steps  # scale the loss back up for reporting
-
-            if batch_idx % 1000 == 0:
-                print(f"Epoch {epoch} batch {batch_idx} loss {loss.item()}")
-
-        running_loss /= len(train_loader)
-        train_losses.append(running_loss)
-        print(f"Epoch {epoch} Training Loss: {running_loss}")
-
-        # After each epoch, validate the model
-        model.eval()
-        val_loss = 0
-
-        with torch.no_grad():
-            for docs, sums in val_loader:
-                docs = docs.to(device)
-                sums = sums.to(device)
-                
-                with autocast():  # enable mixed precision training
-                    output = model(docs, sums)
-                    loss = loss_fn(output.view(-1, output.size(-1)), sums.view(-1))
-
-                val_loss += loss.item()
-
-        val_loss /= len(val_loader)
-        val_losses.append(val_loss)
-        print(f"Validation loss after epoch {epoch}: {val_loss}")
-
-        early_stopping(val_loss, model)
-
-        if early_stopping.early_stop:
-            print("Early stopping")
-            break
-
-        # Plot L2 Norm
-        plt.figure()
-        plt.plot(l2_norms)
-        plt.title('Gradient L2 Norm')
-        plt.savefig(f'graphs/l2_norm_epoch_{epoch}.png')
-        plt.close()
-
-    print("Training completed.")
-
-    # Plot Losses
-    plt.figure()
-    plt.plot(train_losses, label='Training Loss')
-    plt.plot(val_losses, label='Validation Loss')
-    plt.title('Loss curves')
-    plt.legend()
-    plt.savefig('graphs/loss_curves.png')
-    plt.close()
-
-    # Load the best model
-    model.load_state_dict(torch.load('checkpoint.pt', map_location=device))
-
-    # Plot weights and biases
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            plt.figure()
-            plt.hist(param.data.cpu().numpy().flatten(), bins=100)
-            plt.title(name)
-            plt.savefig(f'graphs/{name.replace(".", "_")}.png')
-            plt.close()
-
-
 def test(model, test_loader, loss_fn, device):
     model.eval()
     total_loss = 0
@@ -215,7 +94,8 @@ def train_tokenizer(vocab_size, training_texts):
         ("[EOS]", tokenizer.get_vocab()["[EOS]"]),
         ("[SEP]", tokenizer.get_vocab()["[SEP]"])]
     )
-
+    if not os.path.exists("data"):
+        os.mkdir("data")
     tokenizer.save("data/tokenizer.json")
 
 
